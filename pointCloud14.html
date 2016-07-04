@@ -1,0 +1,509 @@
+<!DOCTYPE html>
+<html>
+	<head>
+		<meta charset=utf-8>
+		<title>Point Cloud</title>
+		<style>
+			body { margin: 0; }
+			canvas { width: 100%; height: 100% }
+		</style>
+	</head>
+	<body>
+<script src="js/three.js"></script>
+<script src="js/orbitControls.js"></script>
+<script type="text/javascript" id='app'>
+ //Global vars
+
+	 var simResolution = 2048; //Global resolution for all texture
+	 var fftTex;            // 1d tex for fft data 
+	 var dataTex; 		// texture holding past data
+	 var hResolution = 256;
+	 var fResolution = 1024;
+	 var currentFrame = 0; //counter for Current Frame
+	 var geoSizeFrequecy = 1024;
+	 var geoSizeHistory = 1024;
+	 var amplitude = 2.0; 
+</script>
+
+
+<script type="text/javascript" id='Utils'>
+
+	var fractionToRadians = function(numerator, denominator){
+			return ((numerator * 2/denominator)-1) * Math.PI ;
+		}; 
+
+	// Converts from degrees to radians.
+	Math.toRadians = function(degrees) {
+	  return degrees * Math.PI / 180;
+		};
+	 
+	// Converts from radians to degrees.
+	Math.toDegrees = function(radians) {
+	  return radians * 180 / Math.PI;
+		};
+
+ </script>
+
+
+
+
+<script type="text/javascript" id='audioDetector'>
+	
+    var audioContext = new AudioContext();
+	var analyserContext;
+	var analyserNode;
+	var fftSize   =   simResolution*2;
+
+
+	var initAudio = function(){
+
+		console.log("initAudio");
+
+        if (!navigator.getUserMedia)
+            navigator.getUserMedia = navigator.webkitGetUserMedia || navigator.mozGetUserMedia;
+        if (!navigator.cancelAnimationFrame)
+            navigator.cancelAnimationFrame = navigator.webkitCancelAnimationFrame || navigator.mozCancelAnimationFrame;
+        if (!navigator.requestAnimationFrame)
+            navigator.requestAnimationFrame = navigator.webkitRequestAnimationFrame || navigator.mozRequestAnimationFrame;
+
+    	navigator.getUserMedia({
+            "audio": {
+                "mandatory": {
+                    "googEchoCancellation": "false",
+                    "googAutoGainControl": "false",
+                    "googNoiseSuppression": "false",
+                    "googHighpassFilter": "false"
+                },
+                "optional": []
+            },
+        }, audioAnalyseInit, function(e) {
+            alert('Error getting audio');
+            console.log(e);
+       		});
+
+		 };
+	 
+
+	function audioAnalyseInit(stream) {
+
+		console.log('gotStream')
+
+	    inputPoint = audioContext.createGain();
+
+	    // Create an AudioNode from the stream.
+	    realAudioInput = audioContext.createMediaStreamSource(stream);
+	    audioInput = realAudioInput;
+	    audioInput.connect(inputPoint);
+
+	    //audioInput = convertToMono( input );
+
+	    analyserNode = audioContext.createAnalyser();
+	    analyserNode.fftSize = simResolution * 2;
+	    inputPoint.connect( analyserNode );
+
+	    //audioRecorder = new Recorder( inputPoint );
+
+	    zeroGain = audioContext.createGain();
+	    zeroGain.gain.value = 0.0;
+	    inputPoint.connect( zeroGain );
+	    zeroGain.connect( audioContext.destination );
+	    init3d()
+
+
+		};
+
+
+	function updateAnalysers() {
+
+		        var freqByteData = new Uint8Array(analyserNode.frequencyBinCount);
+		        analyserNode.getByteFrequencyData(freqByteData);
+				return(freqByteData);		        
+	
+
+	    };
+	   
+
+	function bassHit(){
+
+
+	 	 //bassHit = Math.max(extractFreqRange(100,500,freqByteData)-20,0);
+
+		};
+
+	function extractFreqRange(start,end, byteData){
+
+		var sampleRate = 44100;
+		
+		var hzBandRange    =    sampleRate/(fftSize/2) 
+		var value = 0
+		var numberOfValues=0
+		i = 0
+		while(i*hzBandRange <= end){
+			if(i*hzBandRange >= start){
+				value += byteData[i]
+				numberOfValues++
+			} 
+		i++
+		
+		}   
+
+		return  value/numberOfValues;
+	}
+
+	
+ </script>
+
+<!--sim shader -->
+
+<script type="x-shader/x-vertex" id="basicVertexShader"> 
+
+    precision highp float;	
+	varying vec2 vUv;
+
+	void main() {
+	    vUv = uv;
+	    gl_Position = projectionMatrix *modelViewMatrix * vec4(position, 1.0 );
+	}
+
+	</script>
+
+<script type="x-shader/x-fragment" id="simFragmentShader"> 
+
+    precision highp float;
+	varying vec2 vUv;
+	uniform sampler2D fftArray;
+	uniform sampler2D dataTex;
+	
+	
+	void main(void) {
+
+		//float posSample = fftArray;
+
+		//vec4 posSample  = texture2D(fftArray, vec2(vUv.s - 0.5, vUv.t + 0.5));
+    	vec4 posSample2 = texture2D(fftArray, vUv);
+
+    	//posSample = posSample + posSample2;
+    	//posSample2 = fftArray;
+
+    	gl_FragColor = vec4(0.0,0.0,0.0,0.0);
+
+	   // gl_FragColor = posSample2; // enable for texture preview
+	}
+
+</script>
+
+
+<!--particle shader -->
+
+<script type="x-shader/x-vertex" id="vertexShader"> 
+	
+	#ifdef GL_ES
+	precision highp float;
+	#endif
+
+	attribute float alpha;
+	varying float vAlpha;
+	varying float vHres;
+
+	uniform sampler2D tPos;
+	uniform sampler2D dataTex;
+
+	uniform float frameNo;
+	uniform float hRes;
+	uniform float ampl;
+
+	varying vec2 vUvm;
+	varying vec2 vUv;
+
+
+    void main() {
+
+    	float uvOffset = (frameNo+2.0)/hRes;
+
+    	vUv = uv;
+    	vHres = hRes;
+    	
+    	vUvm = vec2(uv.s, uv.t + uvOffset);
+
+		vec4 posSample = texture2D(tPos, vec2(uv.s, vUvm.g));
+
+		//vUv = uv;
+
+
+	    vAlpha = alpha;
+	    float newPosition = position.z + (alpha * 0.3);
+
+
+        vec4 mvPosition = modelViewMatrix * vec4( position.x, position.y, posSample.g * 100.0 * ampl, 1.0 );
+
+        gl_PointSize = 2.0;
+
+        gl_Position = projectionMatrix * mvPosition;
+
+			}
+
+	</script>
+
+<script type="x-shader/x-fragment" id="fragmentShader"> 
+			
+	#ifdef GL_ES
+	precision highp float;
+	#endif
+
+	uniform sampler2D tPos;
+	uniform sampler2D dataTex;
+
+    uniform vec3 color;
+    varying float vHres;
+
+    varying float vAlpha;
+    varying vec3 vColor;
+    varying vec2 vUv;
+    varying vec2 vUvm;
+
+    void main() {
+
+    	//colour for surface
+    	vec4 posSample = texture2D(tPos, vUvm);
+
+    	vec4 finalColour = vec4(0.0, 0.0, 0.0, 0.0);
+
+    	finalColour.r = vUvm.t * (posSample.r*5.0);
+    	finalColour.g = 0.5;//(1.0/sin(vUvm.s))-0.0;
+    	finalColour.b = posSample.r;
+    	finalColour.a = (0.2*posSample.r)+0.01;
+
+ 
+
+		float finalLuma = (max((1.0 - vUv.t) * - 1.0 + (20.0/vHres),0.0))*3.0; 
+    	 							
+
+
+
+
+        gl_FragColor = vec4(finalColour.r + finalLuma, finalColour.b+finalLuma, finalColour.g+ finalLuma, finalColour.a + (finalLuma * (posSample.r*5.0) ))* vUv.t;
+
+	    	}
+
+</script>  
+
+<script type="text/javascript" id='textureGen'>
+
+
+
+
+
+	function generateEmptyDataTexture(sizeX,sizeY, unitSize){
+		size = sizeX * sizeY
+		var data = new Uint8Array( 2048 * 2048 * 3);
+		for ( var i = 0; i < size ; i ++ ) {
+		    data[ i ] = 0;
+			};
+
+		dataTexture = new THREE.DataTexture( data, sizeX, sizeY, THREE.RGBFormat, THREE.UnsignedByteType);
+		
+        dataTexture.wrapT = THREE.RepeatWrapping;
+
+		return dataTexture;		
+		};
+
+
+    function generateData(fftArray, emptyArray, previousArray){
+
+		var size = fftArray.length;
+
+		currentFrame++
+	
+		for ( var i = 0; i < (size * 3) ; i ++ ) {
+
+		    emptyArray[ i + ( (currentFrame%hResolution) * 2048*3) ] = fftArray[i];
+		    
+			};
+
+	    //console.log(previousArray);
+
+		return emptyArray;
+		};
+
+	function quadArray(array){
+		 outputArray = [];
+		 i=0;
+		 num = 0
+		 while(i < array.length*3 ){
+		 	outputArray.push(array[num]);
+		 	if( i%3 == 0 ){
+		 		num ++
+		 		};
+		 	i++
+		 	};  
+
+	    return outputArray;
+		};
+
+</script>
+
+
+<script type="text/javascript" id='3D'>
+
+	var renderer, scene, camera, cloud, uniforms;
+
+	initAudio();
+
+	var data
+	
+	function init3d() {
+
+	    // renderer
+	    renderer = new THREE.WebGLRenderer();
+	    renderer.setSize( window.innerWidth, window.innerHeight );
+	    document.body.appendChild( renderer.domElement );
+
+
+
+
+	    
+	    // scene
+	    scene = new THREE.Scene();
+
+	    camera = new THREE.PerspectiveCamera( 45, window.innerWidth / window.innerHeight, 1, 10000 );
+
+	    camera.position.z = 500;
+
+	  
+
+	    // point cloud geometry
+	
+
+	    var geometry = new THREE.PlaneBufferGeometry(geoSizeFrequecy, geoSizeHistory, fResolution, hResolution);
+	    var simState = new THREE.PlaneBufferGeometry( 300, 300, 45, 45);
+
+	    fftTex = generateEmptyDataTexture(simResolution, hResolution, 4);
+	   // fftTex2 = generateEmptyDataTexture(simResolution, 4, 4);
+	    dataTex = generateEmptyDataTexture(simResolution,simResolution, 4)
+
+	    // uniforms
+
+	    uniforms = {
+
+	        uColor1: { type: "v3", value: new THREE.Vector3(1.0, 1.0, 1.0) },
+	     	tPos: {type: "t", value: fftTex},
+	     	frameNo: {type:"f", value: currentFrame},
+	     	hRes:{type:"f", value: hResolution}, 
+	     	ampl:{type:"f", value: amplitude},    
+	     	
+
+			};
+
+	    simUniforms= {
+
+	    	fftArray : {type: "t", value: fftTex},
+	    	dataTex :   {type:"t", value: dataTex},
+	    	
+
+	    	};
+
+	     // sim material
+	    var simShaderMaterial = new THREE.ShaderMaterial( {
+
+	        uniforms:       simUniforms,
+	        vertexShader:   document.getElementById( 'basicVertexShader' ).textContent,
+	        fragmentShader: document.getElementById( 'simFragmentShader' ).textContent,
+	        transparent:    true,
+	       // blending: THREE.AdditiveBlending
+
+	   		});
+		
+
+	    // point cloud material
+	    var shaderMaterial = new THREE.ShaderMaterial( {
+
+	        uniforms:       uniforms,
+	        vertexShader:   document.getElementById( 'vertexShader' ).textContent,
+	        fragmentShader: document.getElementById( 'fragmentShader' ).textContent,
+	        transparent:    true,
+
+	        blending: THREE.AdditiveBlending
+
+	    	});
+
+	    // point cloud
+	    cloud = new THREE.Points( geometry, shaderMaterial );
+	    testPlane = new THREE.Mesh( simState, simShaderMaterial);
+
+	    //control cloud
+
+	    //cloud.applyMatrix( new THREE.Matrix4().makeTranslation(geoSizeFrequecy/2, 0.0, geoSizeHistory/2.0));
+
+	    cloud.rotation.x = 3.14/2.0;
+	    cloud.rotation.y = 3.14;
+	    cloud.rotation.z = 3.14;
+
+	    //cloud.translateX(-geoSizeFrequecy/2.0)
+	    //.translateZ(geoSizeHistory/2.0)
+
+	   //cloud.applyMatrix( new THREE.Matrix4().makeTranslation(0.0, 0.0, 0.0));
+
+	    scene.add( testPlane );
+
+	    //scene.add( cloud );	
+
+		scene.add( cloud);
+
+
+		  controls = new THREE.OrbitControls( camera, renderer.domElement );
+				//controls.addEventListener( 'change', render ); // add this only if there is no animation loop (requestAnimationFrame)
+				controls.enableDamping = true;
+				controls.dampingFactor = 0.7;
+				controls.enableZoom = true;
+
+	    animate();
+
+	  
+
+		};
+
+	function animate() {
+
+	    requestAnimationFrame( animate );
+
+	    render();
+
+		};
+
+	var previousData = new Uint8Array( 3 * (2048*2048) );
+
+	var data = new Uint8Array( 3 * (2048*2048) );
+
+	function render() {
+
+		uniforms.frameNo.value = currentFrame;
+
+	    testPlane.material.needsUpdate = true;
+
+	    var freqData = updateAnalysers();
+
+	    freqData = quadArray(freqData)
+
+
+	    data = generateData(freqData, data, previousData);
+		
+
+		fftTex.image.data = data;
+
+	    testPlane.material.uniforms.fftArray.value = fftTex;
+	    cloud.material.uniforms.tPos.value = fftTex;
+
+
+
+		//needs updates	
+		cloud.material.needsUpdate = true;
+	    testPlane.material.needsUpdate = true;
+		fftTex.needsUpdate = true;	
+
+		renderer.render( scene, camera );
+
+		};
+
+</script>
+</body>
+</html>
